@@ -20,7 +20,7 @@ REPO_NAME = "semy77/Likkkkkkkk"
 
 FILE_NAME = "token_ind.json"
 
-INPUT_FILE = "ind.json"
+INPUT_FILE = "randomdata.json"
 
 API_URL = "https://papajwt.vercel.app/kirito?uid={uid}&password={password}"
 
