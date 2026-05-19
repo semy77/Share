@@ -1,0 +1,10 @@
+pyTelegramBotAPI
+flask
+psutil
+requests
+telethon
+pyrogram
+tgcrypto
+aiogram
+beautifulsoup4
+python-dotenv
