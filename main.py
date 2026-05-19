@@ -23,7 +23,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = '8519204836:AAFNAE3iQHlX01e7LFWKL4yRiqU7q-26OhQ'
+TOKEN = '8519204836:AAEEwM970vA55GMeU-oiwboB70TPiZQowkE'
 OWNER_ID_STR = 7898402627
 ADMIN_ID_STR = 7898402627
 YOUR_USERNAME = '@SEMY0HERE'
