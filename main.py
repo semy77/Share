@@ -3,12 +3,11 @@ import os
 import sys
 import logging
 import subprocess
-import psutil
-import sqlite3
 import shutil
 import zipfile
-from datetime import datetime
+import sqlite3
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -17,280 +16,380 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 load_dotenv()
 
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = "8624297353:AAFjqxZ7F-MnMSeicX4bHRQ2i3PkzD-k3E0"
-OWNER_ID = 7898402627
-YOUR_USERNAME = "SEMY0HERE"
-UPDATE_CHANNEL = "https://t.me/YourChannel"
+# --- CONFIGURATION ---
+# Apne credentials .env file mein rakhein ya yahan direct dalein
+TOKEN = "8624297353:AAFs7rcku6gaULup0M-It5YP7dCMVVo2czA"
+ADMIN_ID = 7898402627
 
 BASE_DIR = Path(__file__).parent.absolute()
-SERVERS_DIR = BASE_DIR / 'hosted_servers'  # जहाँ हर सर्वर का अलग venv होगा
-DATABASE_PATH = BASE_DIR / 'bot_data.db'
+SERVERS_DIR = BASE_DIR / 'vps_hosted_bots'
+DATABASE_PATH = BASE_DIR / 'vps_manager.db'
 
 SERVERS_DIR.mkdir(exist_ok=True)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# एक्टिव रनिंग सर्वर्स को ट्रैक करने के लिए डिक्शनरी
-# { user_id: { server_id: { "process": subprocess, "path": Path, "file": name } } }
-running_servers = {}
+# Active processes ko track karne ke liye memory dict
+# { server_id: subprocess.Popen }
+active_processes = {}
 
-# --- DATABASE FUNCTIONS ---
+# --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS servers
-                 (server_id TEXT PRIMARY KEY, user_id INTEGER, name TEXT, path TEXT, status TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS vps_bots
+                 (server_id TEXT PRIMARY KEY, name TEXT, path TEXT, main_file TEXT, status TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- HELPER KEYBOARDS ---
-def get_main_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Updates", url=UPDATE_CHANNEL)],
-        [InlineKeyboardButton(text="📤 Host File", callback_data="host_file"),
-         InlineKeyboardButton(text="📥 Download Files", callback_data="download_files")],
-        [InlineKeyboardButton(text="⚡ Bot Speed", callback_data="bot_speed"),
-         InlineKeyboardButton(text="🤖 Running Bots", callback_data="running_bots")],
-        [InlineKeyboardButton(text="💬 Contact Owner", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
-    ])
-    return keyboard
+# --- SECURITY CHECK DECORATOR ---
+def is_admin(user_id: int):
+    return user_id == ADMIN_ID
 
-# --- COMMAND HANDLERS ---
+# --- KEYBOARDS ---
+def get_main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Host New Bot (.py / .zip)", callback_data="host_new")],
+        [InlineKeyboardButton(text="🖥️ Manage Hosted Bots", callback_data="manage_bots")],
+        [InlineKeyboardButton(text="📊 VPS System Status", callback_data="vps_status")]
+    ])
+
+# --- COMMANDS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    welcome_text = f"""
-╔═══════════════════════╗
-    🚀 <b>MINI VPS HOSTING BOT</b> 🚀
-╚═══════════════════════╝
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Unauthorized! Aap is VPS ke master nahi hain.")
+        return
+    
+    welcome_text = """
+🖥️ <b>WELCOME TO MASTER VPS CONTROLLER</b> 🖥️
+-----------------------------------------
+Aap apne is Telegram Bot se poore VPS par chalne wale baki bots ko asani se manage kar sakte hain.
 
-👋 <b>Hi, {message.from_user.full_name}!</b>
-यहाँ आप अपनी Python या ZIP फ़ाइलें अपलोड करके उन्हें एक अलग आइसोलेटेड सर्वर (Mini VPS) पर होस्ट कर सकते हैं।
-
-• <b>Auto-pip:</b> <code>requirements.txt</code> डिटेक्ट होने पर लाइब्रेरी खुद इंस्टॉल होंगी।
-• <b>Server Isolation:</b> हर होस्ट का अपना अलग सर्वर होगा।
+• Har bot ka data alag folder mein safe rahega.
+• Live logs aur errors check kar sakte hain.
+• Kisi bhi bot ko kabhi bhi Start/Stop/Delete kar sakte hain.
 """
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-# --- CALLBACK HANDLERS ---
+# --- CALLBACKS ---
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
-    await callback.message.edit_text("🏠 <b>Main Menu</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    await callback.message.edit_text("🎮 <b>Master Control Panel Menu:</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "host_file")
-async def host_file_info(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "host_new")
+async def host_new_info(callback: types.CallbackQuery):
     text = """
-📤 <b>HOST NEW FILE / SERVER</b>
+📤 <b>HOW TO HOST A NEW BOT:</b>
 
-<b>स्टेप्स:</b>
-1. बोट को सीधे एक <code>.py</code> फ़ाइल या <code>.zip</code> फ़ाइल भेजें।
-2. अगर ज़िप फ़ाइल है, तो सुनिश्चित करें कि मुख्य फ़ाइल का नाम <code>bot.py</code> या <code>main.py</code> हो।
-3. डिपेंडेंसी के लिए ज़िप में <code>requirements.txt</code> जरूर डालें।
+1. Is chat mein direct ek <code>.py</code> file ya ek <code>.zip</code> file bhejein.
+2. Agar `.zip` file hai, toh uske andar main file ka naam <code>bot.py</code> ya <code>main.py</code> rakhein.
+3. Dependencies automatic install karne ke liye zip ke andar <code>requirements.txt</code> zaroor daalein.
 """
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🏠 Back", callback_data="back_to_main")]]])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_main")]]])
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
-# --- FILE UPLOAD & VPS CREATION LOGIC ---
+# --- FILE UPLOADING & DEPLOYMENT LOGIC ---
 @dp.message(F.document)
-async def handle_docs(message: types.Message):
-    user_id = message.from_user.id
-    document = message.document
-    file_name = document.file_name
-    
-    if not (file_name.endswith('.py') or file_name.endswith('.zip')):
-        await message.answer("❌ सिर्फ .py और .zip फ़ाइलें ही होस्ट की जा सकती हैं!")
+async def handle_bot_upload(message: types.Message):
+    if not is_admin(message.from_user.id):
         return
-        
-    status_msg = await message.answer("📥 फ़ाइल डाउनलोड की जा रही है और सर्वर क्रिएट हो रहा है...")
+
+    doc = message.document
+    filename = doc.file_name
+
+    if not (filename.endswith('.py') or filename.endswith('.zip')):
+        await message.answer("❌ Error: Sirf `.py` ya `.zip` format ki files hi accepted hain!")
+        return
+
+    status_msg = await message.answer("⏳ File received! Isolate space create ho rahi hai...")
+
+    # Unique Server ID generation
+    server_id = f"bot_{int(datetime.now().timestamp())}"
+    bot_dir = SERVERS_DIR / server_id
+    bot_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download File
+    destination_path = bot_dir / filename
+    await bot.download(doc, destination=destination_path)
+
+    await status_msg.edit_text("⚙️ Creating Virtual Environment (venv)...")
     
-    # सर्वर के लिए यूनिक आईडी और पाथ बनाना
-    server_id = f"srv_{user_id}_{int(datetime.now().timestamp())}"
-    server_path = SERVERS_DIR / server_id
-    server_path.mkdir(parents=True, exist_ok=True)
-    
-    file_path = server_path / file_name
-    await bot.download(document, destination=file_path)
-    
-    await status_msg.edit_text("⚙️ <b>Mini VPS सेटअप हो रहा है... Virtual Environment बनाया जा रहा है...</b>", parse_mode="HTML")
-    
-    # 1. Virtual Environment (venv) बनाना ताकि हर सर्वर अलग रहे
-    venv_path = server_path / "venv"
+    # Virtual Environment Create karna taaki data/libraries mix na hon
+    venv_path = bot_dir / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True)
-    
-    # OS के हिसाब से pip और python का पाथ सेट करना
+
     pip_exe = venv_path / "bin" / "pip" if os.name != 'nt' else venv_path / "Scripts" / "pip.exe"
     python_exe = venv_path / "bin" / "python" if os.name != 'nt' else venv_path / "Scripts" / "python.exe"
-    
-    # 2. अगर ZIP है तो उसे अनज़िप करना
-    main_script = file_path
-    if file_name.endswith('.zip'):
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            zip_ref.extractall(server_path)
+
+    main_script = destination_path
+
+    # Extract if ZIP
+    if filename.endswith('.zip'):
+        await status_msg.edit_text("📦 Extracting ZIP files...")
+        with zipfile.ZipFile(destination_path, 'r') as zip_ref:
+            zip_ref.extractall(bot_dir)
         
-        # मुख्य फ़ाइल खोजना
-        if (server_path / "main.py").exists():
-            main_script = server_path / "main.py"
-        elif (server_path / "bot.py").exists():
-            main_script = server_path / "bot.py"
+        # Main file identification
+        if (bot_dir / "main.py").exists():
+            main_script = bot_dir / "main.py"
+        elif (bot_dir / "bot.py").exists():
+            main_script = bot_dir / "bot.py"
         else:
-            # अगर कोई मुख्य फ़ाइल न मिले तो पहली उपलब्ध .py फ़ाइल चुनना
-            py_files = list(server_path.glob("*.py"))
-            if py_files: main_script = py_files[0]
-            
-        # 3. requirements.txt चेक करके लाइब्रेरी इंस्टॉल करना
-        req_path = server_path / "requirements.txt"
-        if req_path.exists():
-            await status_msg.edit_text("📦 <code>requirements.txt</code> मिल गया! लाइब्रेरीज़ इन्सटॉल हो रही हैं, कृपया प्रतीक्षा करें...", parse_mode="HTML")
-            subprocess.run([str(pip_exe), "install", "-r", str(req_path)], check=True)
+            py_files = list(bot_dir.glob("*.py"))
+            if py_files:
+                main_script = py_files[0]
 
-    await status_msg.edit_text("🚀 <b>सर्वर लॉन्च हो रहा है...</b>", parse_mode="HTML")
-    
-    # 4. स्क्रिप्ट को बैकग्राउंड प्रोसेस के रूप में अलग सर्वर पर स्टार्ट करना
+        # Requirements installation
+        req_file = bot_dir / "requirements.txt"
+        if req_file.exists():
+            await status_msg.edit_text("⏳ Installing requirements.txt (Isme thoda time lag sakta hai)...")
+            subprocess.run([str(pip_exe), "install", "-r", str(req_file)], check=True)
+
+    # Log files paths for Output and Errors
+    stdout_log = bot_dir / "output.log"
+    stderr_log = bot_dir / "error.log"
+
+    await status_msg.edit_text("🚀 Starting the Bot process...")
+
     try:
-        process = subprocess.Popen([str(python_exe), str(main_script)], cwd=str(server_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Script ko background mein chalana aur unke logs files mein redirect karna
+        out_file = open(stdout_log, "w")
+        err_file = open(stderr_log, "w")
         
-        # ट्रैक करने के लिए डिक्शनरी में सेव करना
-        if user_id not in running_servers:
-            running_servers[user_id] = {}
-        running_servers[user_id][server_id] = {"process": process, "path": server_path, "file": file_name}
-        
-        # डेटाबेस में एंट्री
+        process = subprocess.Popen(
+            [str(python_exe), str(main_script)],
+            cwd=str(bot_dir),
+            stdout=out_file,
+            stderr=err_file
+        )
+
+        active_processes[server_id] = process
+
+        # DB Entry
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
-        c.execute("INSERT INTO servers VALUES (?, ?, ?, ?, 'RUNNING')", (server_id, user_id, file_name, str(server_path)))
+        c.execute("INSERT INTO vps_bots VALUES (?, ?, ?, ?, 'RUNNING')", 
+                  (server_id, filename, str(bot_dir), str(main_script)))
         conn.commit()
         conn.close()
-        
-        await status_msg.edit_text(f"✅ <b>सर्वर सफलतापूर्वक होस्ट हो गया!</b>\n\n🆔 Server ID: <code>{server_id}</code>\n📂 फ़ाइल: {file_name}\n🟢 स्टेटस: Running (Isolated VPS Mode)", parse_mode="HTML", reply_markup=get_main_keyboard())
+
+        success_text = f"✅ <b>Bot Successfully Hosted!</b>\n\n🆔 <b>ID:</b> <code>{server_id}</code>\n📂 <b>Folder Name:</b> {filename}\n🟢 <b>Status:</b> Running in Isolated VPS Mode"
+        await status_msg.edit_text(success_text, parse_mode="HTML", reply_markup=get_main_keyboard())
+
     except Exception as e:
-        await status_msg.edit_text(f"❌ सर्वर स्टार्ट करने में एरर आया: {e}")
+        await status_msg.edit_text(f"❌ Failed to launch bot. Error: {str(e)}")
 
-# --- RUNNING BOTS (SERVER MANAGER) ---
-@dp.callback_query(F.data == "running_bots")
-async def show_running_bots(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_servers = running_servers.get(user_id, {})
-    
-    if not user_servers:
-        await callback.message.edit_text("🤖 <b>कोई भी सर्वर अभी रन नहीं कर रहा है।</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-        return
-        
-    text = "🤖 <b>आपके एक्टिव सर्वर्स (Mini VPS):</b>\n\n"
-    buttons = []
-    
-    for srv_id, srv_data in user_servers.items():
-        text += f"🖥️ <b>ID:</b> <code>{srv_id}</code>\n📦 <b>फ़ाइल:</b> {srv_data['file']}\n\n"
-        buttons.append([InlineKeyboardButton(text=f"🛑 Stop {srv_data['file'][:15]}", callback_data=f"stop_srv:{srv_id}")])
-        
-    buttons.append([InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+# --- BOT MANAGEMENT PANEL ---
+@dp.callback_query(F.data == "manage_bots")
+async def manage_bots(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id): return
 
-@dp.callback_query(F.data.startswith("stop_srv:"))
-async def stop_server(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    server_id = callback.data.split(":")[1]
-    
-    if user_id in running_servers and server_id in running_servers[user_id]:
-        # प्रोसेस बंद करना
-        process = running_servers[user_id][server_id]["process"]
-        process.terminate()
-        del running_servers[user_id][server_id]
-        
-        # डेटाबेस अपडेट
-        conn = sqlite3.connect(DATABASE_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM servers WHERE server_id = ?", (server_id,))
-        conn.commit()
-        conn.close()
-        
-        await callback.answer("🛑 सर्वर बंद कर दिया गया है!", show_alert=True)
-        await show_running_bots(callback)
-    else:
-        await callback.answer("❌ सर्वर नहीं मिला!", show_alert=True)
-
-# --- DOWNLOAD FILES & SERVER EXPLORER ---
-@dp.callback_query(F.data == "download_files")
-async def download_files_menu(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    
-    # डेटाबेस से इस यूजर के सभी सर्वर्स (चाहे रनिंग हों या स्टॉप) निकालना
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
-    c.execute("SELECT server_id, name FROM servers WHERE user_id = ?", (user_id,))
+    c.execute("SELECT server_id, name, status FROM vps_bots")
     rows = c.fetchall()
     conn.close()
-    
+
     if not rows:
-        await callback.message.edit_text("📂 <b>कोई भी सर्ver फ़ोल्डर उपलब्ध नहीं है।</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
+        await callback.message.edit_text("🤖 Koi bhi bot hosted nahi hai.", reply_markup=get_main_keyboard())
         return
-        
-    text = "📥 <b>नीचे दिए गए सर्वर पर क्लिक करके उसकी सभी फ़ाइलें प्राप्त करें:</b>\n"
+
+    text = "🤖 <b>Hosted Bots List:</b>\n\n"
     buttons = []
-    for srv_id, name in rows:
-        buttons.append([InlineKeyboardButton(text=f"📂 Explore: {name[:20]}", callback_data=f"explore_srv:{srv_id}")])
-        
-    buttons.append([InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")])
+    for srv_id, name, status in rows:
+        # Check if process is actually running in memory
+        actual_status = "🟢 RUNNING" if srv_id in active_processes and active_processes[srv_id].poll() is None else "🔴 STOPPED"
+        text += f"🔹 <b>ID:</b> <code>{srv_id}</code>\n📦 <b>Name:</b> {name}\n⚡ <b>Status:</b> {actual_status}\n\n"
+        buttons.append([InlineKeyboardButton(text=f"⚙️ Manage {name[:15]}", callback_data=f"control:{srv_id}")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Main Menu", callback_data="back_to_main")])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@dp.callback_query(F.data.startswith("explore_srv:"))
-async def explore_and_send_files(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
+# Single Bot Control Actions
+@dp.callback_query(F.data.startswith("control:"))
+async def control_bot_menu(callback: types.CallbackQuery):
     server_id = callback.data.split(":")[1]
     
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
-    c.execute("SELECT path FROM servers WHERE server_id = ?", (server_id,))
+    c.execute("SELECT name, status FROM vps_bots WHERE server_id = ?", (server_id,))
     row = c.fetchone()
     conn.close()
-    
+
     if not row:
-        await callback.answer("❌ सर्वर पाथ नहीं मिला!", show_alert=True)
+        await callback.answer("Bot nahi mila!")
         return
-        
-    server_path = Path(row[0])
-    if not server_path.exists():
-        await callback.answer("❌ सर्वर फ़ोल्डर सर्वर से डिलीट हो चुका है!", show_alert=True)
+
+    name, _ = row
+    is_running = server_id in active_processes and active_processes[server_id].poll() is None
+    status_str = "🟢 Running" if is_running else "🔴 Stopped"
+
+    text = f"🛠️ <b>Bot Settings: {name}</b>\nID: <code>{server_id}</code>\nCurrent State: <b>{status_str}</b>"
+    
+    buttons = [
+        [
+            InlineKeyboardButton(text="▶️ Start", callback_data=f"start_b:{server_id}"),
+            InlineKeyboardButton(text="🛑 Stop", callback_data=f"stop_b:{server_id}")
+        ],
+        [
+            InlineKeyboardButton(text="📄 View Error Logs", callback_data=f"logs_err:{server_id}"),
+            InlineKeyboardButton(text="📥 Download Files", callback_data=f"dl_dir:{server_id}")
+        ],
+        [InlineKeyboardButton(text="🗑️ Delete Completely", callback_data=f"del_b:{server_id}")],
+        [InlineKeyboardButton(text="🔙 Back to List", callback_data="manage_bots")]
+    ]
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+# STOP ACTION
+@dp.callback_query(F.data.startswith("stop_b:"))
+async def stop_bot_process(callback: types.CallbackQuery):
+    server_id = callback.data.split(":")[1]
+    if server_id in active_processes:
+        process = active_processes[server_id]
+        process.terminate()
+        process.wait() # process safely close karein
+        del active_processes[server_id]
+        await callback.answer("🛑 Bot Process stopped successfully!", show_alert=True)
+    else:
+        await callback.answer("⚠️ Bot pehle se hi band hai.", show_alert=True)
+    await control_bot_menu(callback)
+
+# START ACTION
+@dp.callback_query(F.data.startswith("start_b:"))
+async def start_bot_process(callback: types.CallbackQuery):
+    server_id = callback.data.split(":")[1]
+    
+    if server_id in active_processes and active_processes[server_id].poll() is None:
+        await callback.answer("⚠️ Bot pehle se hi chal raha hai.", show_alert=True)
         return
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT path, main_file FROM vps_bots WHERE server_id = ?", (server_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        bot_dir, main_script = Path(row[0]), Path(row[1])
+        venv_path = bot_dir / "venv"
+        python_exe = venv_path / "bin" / "python" if os.name != 'nt' else venv_path / "Scripts" / "python.exe"
         
-    await callback.message.answer(f"📦 <b>सर्वर ({server_id}) की फ़ाइलें निकाली जा रही हैं और भेजी जा रही हैं...</b>", parse_mode="HTML")
-    
-    # सर्वर फ़ोल्डर के अंदर की सभी मुख्य फ़ाइलें ढूंढना (venv फ़ोल्डर को छोड़कर)
-    files_sent = 0
-    for item in server_path.rglob("*"):
-        if item.is_file() and "venv" not in item.parts:
-            try:
-                # टेलीग्राम पर फ़ाइल भेजना
-                await callback.message.reply_document(document=FSInputFile(str(item)), caption=f"📄 फ़ाइल: <code>{item.name}</code>", parse_mode="HTML")
-                files_sent += 1
-                await asyncio.sleep(0.5) # फ्लडिंग से बचने के लिए छोटा गैप
-            except Exception as e:
-                logger.error(f"Error sending file {item.name}: {e}")
-                
-    if files_sent == 0:
-        await callback.message.answer("⚠️ इस सर्वर फ़ोल्डर में कोई फ़ाइल नहीं मिली।")
-    await callback.answer()
+        stdout_log = bot_dir / "output.log"
+        stderr_log = bot_dir / "error.log"
 
-# --- BOT SPEED ---
-@dp.callback_query(F.data == "bot_speed")
-async def callback_bot_speed(callback: types.CallbackQuery):
-    start_time = datetime.now()
-    await callback.answer("⚡ Speed Testing...")
-    end_time = datetime.now()
-    speed = (end_time - start_time).total_seconds() * 1000
-    
-    text = f"╔═══════════════════════╗\n    ⚡ <b>SPEED TEST</b> ⚡\n╚═══════════════════════╝\n\n🚀 <b>Response Time:</b> {speed:.2f}ms\n🖥️ <b>CPU Usage:</b> {psutil.cpu_percent()}%\n📊 <b>Memory:</b> {psutil.virtual_memory().percent}%"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🏠 Home", callback_data="back_to_main")]]])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        out_file = open(stdout_log, "a")
+        err_file = open(stderr_log, "a")
 
-# --- START BOT ---
+        process = subprocess.Popen([str(python_exe), str(main_script)], cwd=str(bot_dir), stdout=out_file, stderr=err_file)
+        active_processes[server_id] = process
+        await callback.answer("🚀 Bot start kar diya gaya hai!", show_alert=True)
+    
+    await control_bot_menu(callback)
+
+# VIEW LOGS/ERRORS ACTION
+@dp.callback_query(F.data.startswith("logs_err:"))
+async def view_bot_logs(callback: types.CallbackQuery):
+    server_id = callback.data.split(":")[1]
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT path FROM vps_bots WHERE server_id = ?", (server_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        err_log_path = Path(row[0]) / "error.log"
+        if err_log_path.exists():
+            with open(err_log_path, "r") as f:
+                logs = f.read()[-3000:] # Aakhri ke 3000 chars read karega taaki message limit cross na ho
+            
+            if not logs.strip():
+                logs = "No errors found! Clean logs. 🟢"
+            
+            text = f"📄 <b>Error Logs (Last few lines):</b>\n\n<code>{logs}</code>"
+        else:
+            text = "❌ Log file abhi tak create nahi hui hai."
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🔙 Back", callback_data=f"control:{server_id}")]]])
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+# DOWNLOAD FILES ACTION
+@dp.callback_query(F.data.startswith("dl_dir:"))
+async def download_bot_files(callback: types.CallbackQuery):
+    server_id = callback.data.split(":")[1]
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT path, name FROM vps_bots WHERE server_id = ?", (server_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        bot_dir = Path(row[0])
+        bot_name = row[1]
+        await callback.message.answer(f"📦 <code>{bot_name}</code> folder ki saari files nikal kar bheji ja rahi hain...")
+
+        # Venv folder ko chhod kar baaki files user ko bhejna
+        for item in bot_dir.rglob("*"):
+            if item.is_file() and "venv" not in item.parts and item.name not in ["output.log", "error.log"]:
+                try:
+                    await callback.message.reply_document(document=FSInputFile(str(item)), caption=f"📄 File: <code>{item.name}</code>", parse_mode="HTML")
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.error(f"Error sending file {item.name}: {e}")
+        await callback.answer("Sent!")
+
+# DELETE ACTION
+@dp.callback_query(F.data.startswith("del_b:"))
+async def delete_bot_completely(callback: types.CallbackQuery):
+    server_id = callback.data.split(":")[1]
+    
+    # Process band karein agar chal raha ho
+    if server_id in active_processes:
+        active_processes[server_id].terminate()
+        active_processes[server_id].wait()
+        del active_processes[server_id]
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT path FROM vps_bots WHERE server_id = ?", (server_id,))
+    row = c.fetchone()
+    
+    if row:
+        bot_dir = Path(row[0])
+        if bot_dir.exists():
+            shutil.rmtree(bot_dir) # Poora folder delete
+
+        c.execute("DELETE FROM vps_bots WHERE server_id = ?", (server_id,))
+        conn.commit()
+    conn.close()
+
+    await callback.answer("🗑️ Bot files aur database entry permanently delete kar di gayi hai!", show_alert=True)
+    await manage_bots(callback)
+
+# --- SYSTEM MONITOR ---
+@dp.callback_query(F.data == "vps_status")
+async def view_vps_status(callback: types.CallbackQuery):
+    import psutil
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    disk = psutil.disk_usage('/').percent
+    
+    status_text = f"📊 <b>VPS LIVE STATUS</b>\n\n🖥️ <b>CPU Usage:</b> {cpu}%\n💾 <b>RAM Usage:</b> {ram}%\n💽 <b>Disk Space:</b> {disk}%"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_main")]]])
+    await callback.message.edit_text(status_text, parse_mode="HTML", reply_markup=keyboard)
+
+# --- MAIN ---
 async def main():
-    logger.info("Starting up the Ultra Host Bot...")
+    logger.info("Master VPS Bot Started...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
